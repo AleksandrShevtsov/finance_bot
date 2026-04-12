@@ -1,0 +1,12 @@
+# Скопируй это в свой config.py и подставь реальные значения
+
+EXECUTION_MODE = "paper"   # "paper" | "real"
+
+TELEGRAM_ENABLED = True
+TELEGRAM_BOT_TOKEN = "PASTE_YOUR_TELEGRAM_BOT_TOKEN"
+TELEGRAM_CHAT_ID = "PASTE_YOUR_TELEGRAM_CHAT_ID"
+
+BINGX_ENABLED = False
+BINGX_API_KEY = "PASTE_YOUR_BINGX_API_KEY"
+BINGX_SECRET_KEY = "PASTE_YOUR_BINGX_SECRET_KEY"
+BINGX_BASE_URL = "https://open-api.bingx.com"

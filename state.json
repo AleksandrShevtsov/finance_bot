@@ -1,0 +1,81 @@
+{
+  "balance": 500.0,
+  "positions": {
+    "BTCUSDT": null,
+    "ETHUSDT": {
+      "side": "BUY",
+      "entry": 2081.28,
+      "qty": 0.007207,
+      "notional": 15.0,
+      "stop": 2068.79232,
+      "take": 2106.25536,
+      "opened_at": 1775563901630
+    },
+    "SOLUSDT": {
+      "side": "SELL",
+      "entry": 78.85,
+      "qty": 0.190235,
+      "notional": 15.0,
+      "stop": 79.3231,
+      "take": 77.90379999999999,
+      "opened_at": 1775564166452
+    },
+    "BNBUSDT": null,
+    "XRPUSDT": null,
+    "ADAUSDT": null,
+    "DOGEUSDT": null,
+    "AVAXUSDT": null,
+    "LINKUSDT": null,
+    "DOTUSDT": null
+  },
+  "cooldowns": {
+    "BTCUSDT": 0,
+    "ETHUSDT": 0,
+    "SOLUSDT": 0,
+    "BNBUSDT": 0,
+    "XRPUSDT": 0,
+    "ADAUSDT": 0,
+    "DOGEUSDT": 0,
+    "AVAXUSDT": 0,
+    "LINKUSDT": 0,
+    "DOTUSDT": 0
+  },
+  "oi_prev": {
+    "BTCUSDT": 48451.998,
+    "ETHUSDT": 796945.08,
+    "SOLUSDT": 7265235.7,
+    "BNBUSDT": 145332.07999999,
+    "XRPUSDT": 148324661.0,
+    "ADAUSDT": 215090580.0,
+    "DOGEUSDT": 1128670348.0,
+    "AVAXUSDT": 4976885.8,
+    "LINKUSDT": 5812266.4,
+    "DOTUSDT": 20402120.8
+  },
+  "oi_now": {
+    "BTCUSDT": 48451.998,
+    "ETHUSDT": 796945.08,
+    "SOLUSDT": 7265235.7,
+    "BNBUSDT": 145332.07999999,
+    "XRPUSDT": 148324661.0,
+    "ADAUSDT": 215090580.0,
+    "DOGEUSDT": 1128670348.0,
+    "AVAXUSDT": 4976885.8,
+    "LINKUSDT": 5812266.4,
+    "DOTUSDT": 20402120.8
+  },
+  "last_signal": {
+    "BTCUSDT": "HOLD",
+    "ETHUSDT": "HOLD",
+    "SOLUSDT": "HOLD",
+    "BNBUSDT": "HOLD",
+    "XRPUSDT": "HOLD",
+    "ADAUSDT": "HOLD",
+    "DOGEUSDT": "HOLD",
+    "AVAXUSDT": "HOLD",
+    "LINKUSDT": "HOLD",
+    "DOTUSDT": "HOLD"
+  },
+  "last_heartbeat": 1775568253772,
+  "closed_trades": 163
+}
