@@ -1,6 +1,10 @@
 def _price_bins(low, high, bins):
-    if bins <= 0 or high <= low:
-        return [low, high]
+    if bins <= 0:
+        return []
+
+    if high <= low:
+        return []
+
     step = (high - low) / bins
     return [low + step * i for i in range(bins + 1)]
 
@@ -12,19 +16,30 @@ def build_volume_profile(candles, bins=24, lookback=80):
     window = candles[-lookback:]
     low = min(c["low"] for c in window)
     high = max(c["high"] for c in window)
+
+    if high <= low:
+        return {"bins": [], "hvn": [], "lvn": []}
+
     edges = _price_bins(low, high, bins)
+
+    if not edges or len(edges) != bins + 1:
+        return {"bins": [], "hvn": [], "lvn": []}
+
     volumes = [0.0 for _ in range(bins)]
 
     for candle in window:
         typical_price = (candle["high"] + candle["low"] + candle["close"]) / 3
         volume = candle.get("volume", 0.0)
+
         for idx in range(bins):
             left = edges[idx]
             right = edges[idx + 1]
+
             if idx == bins - 1:
                 fits = left <= typical_price <= right
             else:
                 fits = left <= typical_price < right
+
             if fits:
                 volumes[idx] += volume
                 break
@@ -34,6 +49,7 @@ def build_volume_profile(candles, bins=24, lookback=80):
 
     avg_volume = sum(volumes) / len(volumes)
     bin_centers = [(edges[i] + edges[i + 1]) / 2 for i in range(bins)]
+
     hvn = [bin_centers[i] for i, v in enumerate(volumes) if v >= avg_volume * 1.35]
     lvn = [bin_centers[i] for i, v in enumerate(volumes) if v <= avg_volume * 0.65]
 
@@ -43,9 +59,11 @@ def build_volume_profile(candles, bins=24, lookback=80):
 def nearest_level(price, levels, side):
     if not levels:
         return None
+
     if side == "BUY":
         above = [lvl for lvl in levels if lvl > price]
         return min(above) if above else None
+
     below = [lvl for lvl in levels if lvl < price]
     return max(below) if below else None
 
@@ -56,6 +74,7 @@ def detect_liquidity_sweep(candles, lookback=20, wick_threshold_mult=1.2):
 
     window = candles[-lookback - 1:-1]
     last = candles[-1]
+
     prior_high = max(c["high"] for c in window)
     prior_low = min(c["low"] for c in window)
 
@@ -86,9 +105,11 @@ def is_false_breakout(candles, breakout, tolerance_pct=0.0007):
 
     last = candles[-1]
     level = breakout.get("breakout_level", breakout.get("trendline_price"))
+
     if level is None:
         return False
 
     if breakout["direction"] == "BUY":
         return last["close"] < level * (1 - tolerance_pct)
+
     return last["close"] > level * (1 + tolerance_pct)

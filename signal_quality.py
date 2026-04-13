@@ -44,13 +44,13 @@ def classify_signal_quality(
     if regime_name:
         reasons.append(f"regime:{regime_name}")
 
-    if retest_confirmation and volume_confirmed and structure_ok and strong_htf and multi_bar_confirmed and score >= 0.42:
+    if retest_confirmation and volume_confirmed and structure_ok and strong_htf and multi_bar_confirmed and score >= 0.40:
         return "A", reasons
 
-    if (breakout_confirmation or trendline_confirmation) and structure_ok and multi_bar_confirmed and score >= 0.34:
+    if (breakout_confirmation or trendline_confirmation) and structure_ok and multi_bar_confirmed and score >= 0.32:
         return "B", reasons
 
-    if (fast_move or acceleration or liquidity_sweep) and score >= 0.30:
+    if (fast_move or acceleration or liquidity_sweep) and score >= 0.28:
         return "C", reasons
 
     return "REJECT", reasons

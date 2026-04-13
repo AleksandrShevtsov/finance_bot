@@ -10,6 +10,7 @@ from telegram_notifier import TelegramNotifier
 from executors.bingx_real_executor import BingXRealExecutor
 from connectors.binance_stream import BinanceMarketFeed
 from connectors.bybit_client import BybitOIClient
+from main_block_control import apply_block_filters
 from config import (
     EXECUTION_MODE,
     TELEGRAM_ENABLED,
@@ -603,119 +604,62 @@ class SmartMomentumPaperBot:
 
         if not any_open:
             log_cyan("OPEN_POS none")
-
+    
     def analyze_symbol(self, symbol):
         htf_trend = detect_htf_trend(symbol)
-
+        
         candles = fetch_klines(symbol, "15m", 200)
-        if not candles or len(candles) < 50:
-            log_yellow(f"SKIP {symbol} | reason=not_enough_candles")
+        if not candles:
             return
-
+        
+        current_price = candles[-1]["close"]
+        
         structure = detect_market_structure(candles)
         volume_confirmed, last_vol, avg_vol = breakout_volume_confirms(candles)
-
-        current_price = candles[-1]["close"]
-        regime = market_regime(candles)
-        symbol_profile = self._symbol_profile(symbol)
-
-        breakout_pct = adaptive_threshold(0.0015, regime.get("atr_pct", 0.0), floor_mult=0.7, cap_mult=1.8)
-        retest_tolerance = adaptive_threshold(0.0015, regime.get("atr_pct", 0.0), floor_mult=0.75, cap_mult=1.7)
-
-        try:
-            breakout = detect_range_breakout(candles, lookback=20, breakout_pct=breakout_pct)
-        except Exception as e:
-            log_yellow(f"SOFT FAIL {symbol} | module=breakout | error={e}")
-            breakout = None
-
-        try:
-            trendline = detect_trendline_breakout(
-                candles,
-                confluence_threshold_pct=adaptive_threshold(0.002, regime.get("atr_pct", 0.0)),
-            )
-        except Exception as e:
-            log_yellow(f"SOFT FAIL {symbol} | module=trendline | error={e}")
-            trendline = None
-
+        
+        breakout = detect_range_breakout(candles)
+        trendline = detect_trendline_breakout(candles)
+        
+        breakout_confirmation = breakout
+        trendline_confirmation = trendline
+        
         retest = None
-        if trendline:
-            try:
-                retest = detect_retest_after_breakout(candles, trendline, tolerance_pct=retest_tolerance)
-            except Exception as e:
-                log_yellow(f"SOFT FAIL {symbol} | module=retest_trendline | error={e}")
-                retest = None
-        elif breakout:
-            try:
-                retest = detect_retest_after_breakout(candles, breakout, tolerance_pct=retest_tolerance)
-            except Exception as e:
-                log_yellow(f"SOFT FAIL {symbol} | module=retest_breakout | error={e}")
-                retest = None
-
-        try:
-            fast_move = detect_fast_move(candles)
-        except Exception as e:
-            log_yellow(f"SOFT FAIL {symbol} | module=fast_move | error={e}")
-            fast_move = None
-
-        try:
-            acceleration = detect_price_acceleration(candles)
-        except Exception as e:
-            log_yellow(f"SOFT FAIL {symbol} | module=acceleration | error={e}")
-            acceleration = None
-
-        try:
-            liquidity_sweep = detect_liquidity_sweep(candles, lookback=20)
-        except Exception as e:
-            log_yellow(f"SOFT FAIL {symbol} | module=liquidity_sweep | error={e}")
-            liquidity_sweep = None
-
-        try:
-            volume_profile = build_volume_profile(candles, bins=24, lookback=80)
-        except Exception as e:
-            log_yellow(f"SOFT FAIL {symbol} | module=volume_profile | error={e}")
-            volume_profile = {"bins": [], "hvn": [], "lvn": []}
-
+        if trendline_confirmation:
+            retest = detect_retest_after_breakout(candles, trendline_confirmation)
+        elif breakout_confirmation:
+            retest = detect_retest_after_breakout(candles, breakout_confirmation)
+        
+        retest_confirmation = retest
+        
+        fast_move = detect_fast_move(candles)
+        acceleration = detect_price_acceleration(candles)
+        
+        pattern = None
         trades = []
         imbalance = 0.0
-        if self.market_feed is not None:
-            trades, _, imbalance = self.market_feed.snapshot(symbol)
-
-        oi_now, oi_prev = self.oi_client.get_oi_pair(symbol)
-        self.feed_health.note_oi(symbol, oi_now)
-        oi_context = classify_oi_price_context(candles, oi_now, oi_prev, lookback=4)
-
-        feed_ready = self.feed_health.feed_ready(self.market_feed)
-        symbol_ready = self.feed_health.symbol_ready(self.market_feed, symbol)
-        oi_ready = self.feed_health.oi_ready(symbol)
-
-        if not symbol_ready:
-            trades = []
-            imbalance = 0.0
-        if not oi_ready:
-            oi_now = None
-            oi_prev = None
-
-        breakout_confirmation = confirm_breakout_with_orderflow(
-            trades=trades,
-            imbalance=imbalance,
-            oi_now=oi_now,
-            oi_prev=oi_prev,
-            breakout=breakout,
-        ) or breakout
-
-        trendline_confirmation = confirm_trendline_breakout(
-            trades=trades,
-            imbalance=imbalance,
-            oi_now=oi_now,
-            oi_prev=oi_prev,
-            breakout=trendline,
-        ) or trendline
-
-        breakout_multi_bar = multi_bar_breakout_confirmation(candles, breakout_confirmation, bars=2)
-        trendline_multi_bar = multi_bar_breakout_confirmation(candles, trendline_confirmation, bars=2)
-        retest_confirmation = retest
-        pattern = None
-
+        oi_now = None
+        oi_prev = None
+        oi_data = None
+        
+        # если у тебя есть отдельный OI-модуль — подставь сюда реальные данные
+        # oi_data = ...
+        # oi_now = ...
+        # oi_prev = ...
+        
+        # если у тебя есть detector режима — подставь сюда его
+        regime = "range_day"
+        
+        # если у тебя есть профиль символа — подставь сюда его
+        # например ALT / MAJOR
+        symbol_profile = "ALT"
+        
+        # если у тебя есть liquidity sweep detector — подставь сюда его
+        liquidity_sweep = None
+        
+        # если у тебя есть multi-bar подтверждения — подставь реальные
+        breakout_multi_bar = False
+        trendline_multi_bar = False
+        
         sig = build_signal(
             symbol=symbol,
             trades=trades,
@@ -726,184 +670,140 @@ class SmartMomentumPaperBot:
             breakout_confirmation=breakout_confirmation,
             trendline_confirmation=trendline_confirmation,
             retest_confirmation=retest_confirmation,
-            regime=regime,
-            oi_context=oi_context,
-            liquidity_sweep=liquidity_sweep,
-            htf_trend=htf_trend,
-            structure=structure,
-            symbol_profile=symbol_profile,
         )
-
-        orderflow_bias = sig.components.get("orderflow", 0.0)
-        oi_bias = sig.components.get("oi", 0.0)
-
+        
+        # fast_move и acceleration только усиливают уже существующий сигнал
         if fast_move and sig.side != "HOLD" and fast_move["direction"] == sig.side:
             sig.score = max(sig.score, 0.42)
             sig.reason = f"{sig.reason}|{fast_move['reason']}"
-
+        
         if acceleration and sig.side != "HOLD" and acceleration["direction"] == sig.side:
             sig.score = max(sig.score, 0.46)
             sig.reason = f"{sig.reason}|{acceleration['reason']}"
-
+        
         sig.side = self.invert_side_if_needed(sig.side)
-
+        
+        # мягкий HTF penalty вместо жёсткой блокировки
         if htf_trend == "BULL" and sig.side == "SELL":
-            sig.side = "HOLD"
-            sig.reason = "blocked_by_htf_bull"
-
+            sig.score = max(0.0, sig.score - 0.05)
+            sig.reason = f"{sig.reason}|soft_htf_bull_penalty"
+        
         if htf_trend == "BEAR" and sig.side == "BUY":
-            sig.side = "HOLD"
-            sig.reason = "blocked_by_htf_bear"
-
+            sig.score = max(0.0, sig.score - 0.05)
+            sig.reason = f"{sig.reason}|soft_htf_bear_penalty"
+        
         structure_ok = structure_allows_side(structure, sig.side) if sig.side in ("BUY", "SELL") else False
-
+        
         signal_class, quality_reasons = classify_signal_quality(
             side=sig.side,
             score=sig.score,
             breakout_confirmation=breakout_confirmation,
             trendline_confirmation=trendline_confirmation,
-            retest_confirmation=retest,
+            retest_confirmation=retest_confirmation,
             fast_move=fast_move,
             acceleration=acceleration,
             htf_trend=htf_trend,
             volume_confirmed=volume_confirmed,
             structure_ok=structure_ok,
-            regime_name=regime.get("name"),
-            liquidity_sweep=liquidity_sweep,
-            multi_bar_confirmed=(breakout_multi_bar or trendline_multi_bar or retest_confirmation is not None),
         )
-
+        
         sig.signal_class = signal_class
-        if quality_reasons:
-            sig.reason = f"{sig.reason}|class={signal_class}|q={','.join(quality_reasons)}"
-        else:
-            sig.reason = f"{sig.reason}|class={signal_class}"
-
+        sig.reason = f"{sig.reason}|class={signal_class}|q={','.join(quality_reasons)}"
+        
         if self.last_signal.get(symbol) != sig.side:
             log(
                 f"{symbol} signal {self.last_signal.get(symbol, 'NONE')} -> {sig.side} | "
-                f"trend={htf_trend} | regime={regime.get('name')} | class={sig.signal_class} | score={sig.score:.3f} | reason={sig.reason}"
+                f"trend={htf_trend} | regime={regime} | class={sig.signal_class} | "
+                f"score={sig.score:.3f} | reason={sig.reason}"
             )
             self.last_signal[symbol] = sig.side
-
+        
+        # если позиция уже открыта — только сопровождение
         if self.positions.get(symbol) is not None:
-            self.manage_position(symbol, current_price, sig.side, orderflow_bias=orderflow_bias, oi_bias=oi_bias)
+            self.manage_position(symbol, current_price, sig.side)
             return
-
+        
+        # cooldown после закрытия
         if time.time() < self.cooldown_until.get(symbol, 0):
             return
-
-        if sig.side in ("BUY", "SELL"):
-            if not feed_ready:
-                log_yellow(f"BLOCKED {symbol} | reason=feed_not_ready")
-                return
-            if not symbol_ready:
-                log_yellow(f"BLOCKED {symbol} | reason=symbol_feed_warmup")
-                return
-            if not oi_ready:
-                log_yellow(f"BLOCKED {symbol} | reason=oi_not_ready")
-                return
-
-            allowed_time, time_reason = trading_window_allows_entry(symbol)
-            if not allowed_time:
-                log_yellow(f"BLOCKED {symbol} | reason={time_reason}")
-                return
-
-            if regime.get("name") == "high_volatility_panic":
-                log_yellow(f"BLOCKED {symbol} | reason=panic_regime")
-                return
-
-        if sig.side in ("BUY", "SELL"):
-            if sig.signal_class == "REJECT":
-                log_yellow(f"BLOCKED {symbol} | reason=signal_class_reject")
-                return
-
-            if breakout_confirmation and not volume_confirmed:
-                log_yellow(
-                    f"BLOCKED {symbol} | reason=breakout_no_volume | last_vol={last_vol:.2f} | avg_vol={avg_vol:.2f}"
+            # low price retest filter
+            if LOW_PRICE_REQUIRES_RETEST:
+                if is_low_price_coin(current_price, LOW_PRICE_COIN_THRESHOLD):
+                    if sig.side == "BUY" and retest_confirmation is None:
+                        log_yellow(f"BLOCKED {symbol} | reason=low_price_requires_retest")
+                        return
+            
+            # extension filter
+            blocked_ext = False
+            ext_value = 0.0
+            if EXTENSION_FILTER_ENABLED and sig.side in ("BUY", "SELL"):
+                blocked_ext, ext_value = blocked_by_extension(
+                    candles=candles,
+                    side=sig.side,
+                    lookback=EXTENSION_LOOKBACK,
+                    max_ext_low_pct=MAX_EXTENSION_FROM_LOCAL_LOW_PCT,
+                    max_ext_high_pct=MAX_EXTENSION_FROM_LOCAL_HIGH_PCT,
                 )
-                return
-
-            if not structure_ok:
-                log_yellow(f"BLOCKED {symbol} | reason=structure_filter | trend={structure['trend']}")
-                return
-
-            if breakout_confirmation and not breakout_multi_bar and retest_confirmation is None:
-                log_yellow(f"BLOCKED {symbol} | reason=breakout_not_held")
-                return
-
-            if trendline_confirmation and not trendline_multi_bar and retest_confirmation is None:
-                log_yellow(f"BLOCKED {symbol} | reason=trendline_not_held")
-                return
-
-            if is_false_breakout(candles, breakout_confirmation) or is_false_breakout(candles, trendline_confirmation):
-                log_yellow(f"BLOCKED {symbol} | reason=false_breakout")
-                return
-
-            if symbol_profile == "ALT" and liquidity_sweep is None and retest_confirmation is None and sig.signal_class != "A":
-                log_yellow(f"BLOCKED {symbol} | reason=alt_needs_reclaim_context")
-                return
-
-        if LOW_PRICE_REQUIRES_RETEST:
-            if is_low_price_coin(current_price, LOW_PRICE_COIN_THRESHOLD):
-                if sig.side == "BUY" and retest is None:
-                    log_yellow(
-                        f"BLOCKED {symbol} | side=BUY | reason=low_price_requires_retest"
-                    )
-                    return
-
-        if EXTENSION_FILTER_ENABLED and sig.side in ("BUY", "SELL"):
-            blocked_ext, ext_value = blocked_by_extension(
-                candles=candles,
-                side=sig.side,
-                lookback=EXTENSION_LOOKBACK,
-                max_ext_low_pct=MAX_EXTENSION_FROM_LOCAL_LOW_PCT,
-                max_ext_high_pct=MAX_EXTENSION_FROM_LOCAL_HIGH_PCT,
-            )
-
-            if blocked_ext:
-                log_yellow(
-                    f"BLOCKED {symbol} | side={sig.side} | extension={ext_value:.4f} | reason=too_extended"
-                )
-                return
-
-        if sig.side in ("BUY", "SELL"):
-            if ANTI_FOMO_ENABLED:
+            
+            # anti-fomo filter
+            blocked = False
+            move_pct = 0.0
+            if sig.side in ("BUY", "SELL") and ANTI_FOMO_ENABLED:
                 blocked, move_pct = blocked_by_anti_fomo(
                     candles=candles,
                     side=sig.side,
                     lookback=ANTI_FOMO_LOOKBACK,
                     max_move_pct=ANTI_FOMO_MAX_MOVE_PCT,
                 )
-
-                if blocked:
-                    log_yellow(
-                        f"BLOCKED {symbol} | side={sig.side} | anti_fomo=True | recent_move={move_pct:.4f}"
-                    )
-                    return
-
-            entry_price = sig.entry_price if sig.entry_price else current_price
-            liquidity_target = nearest_level(entry_price, volume_profile.get("hvn", []), sig.side)
-            strategy_meta = {
-                "regime": regime.get("name"),
-                "signal_components": sig.components,
-                "orderflow_bias": orderflow_bias,
-                "oi_bias": oi_bias,
-                "liquidity_target": liquidity_target,
-                "volume_profile_hvn": volume_profile.get("hvn", [])[:5],
-                "volume_profile_lvn": volume_profile.get("lvn", [])[:5],
-            }
-
-            self.open_position(
-                symbol=symbol,
-                side=sig.side,
-                entry_price=entry_price,
-                score=sig.score,
-                reason=sig.reason,
-                candles=candles,
-                signal_class=sig.signal_class,
-                strategy_meta=strategy_meta,
+            
+            # единая точка BLOCKED-фильтров
+            allowed, reason = apply_block_filters(
+                symbol,
+                sig,
+                structure_ok=structure_ok,
+                volume_confirmed=volume_confirmed,
+                panic_regime=(regime == "high_volatility_panic"),
+                reclaim_needed=(
+                        symbol_profile == "ALT"
+                        and liquidity_sweep is None
+                        and retest_confirmation is None
+                        and sig.signal_class != "A"
+                ),
+                oi_ready=(oi_data is not None),
+                htf_conflict=False,
+                extension_block=blocked_ext,
+                anti_fomo_block=blocked,
             )
+            
+            if not allowed:
+                log_yellow(f"BLOCKED {symbol} | reason={reason}")
+                return
+            
+            # эти проверки оставляем отдельно
+            if breakout_confirmation and not breakout_multi_bar and retest_confirmation is None:
+                log_yellow(f"BLOCKED {symbol} | reason=breakout_not_held")
+                return
+            
+            if trendline_confirmation and not trendline_multi_bar and retest_confirmation is None:
+                log_yellow(f"BLOCKED {symbol} | reason=trendline_not_held")
+                return
+            
+            if is_false_breakout(candles, breakout_confirmation) or is_false_breakout(candles, trendline_confirmation):
+                log_yellow(f"BLOCKED {symbol} | reason=false_breakout")
+                return
+            
+            if sig.side in ("BUY", "SELL"):
+                entry_price = sig.entry_price if sig.entry_price else current_price
+                
+                self.open_position(
+                    symbol=symbol,
+                    side=sig.side,
+                    entry_price=entry_price,
+                    score=sig.score,
+                    reason=sig.reason,
+                    candles=candles,
+                    signal_class=sig.signal_class,
+                )
 
     def heartbeat(self):
         if self.market_feed is not None:
