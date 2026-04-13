@@ -21,6 +21,9 @@ class BingXRealExecutor:
         self.session = requests.Session()
         self.session.headers.update({"X-BX-APIKEY": self.api_key})
 
+    def has_credentials(self):
+        return bool(self.api_key and self.secret_key)
+
     def _sign_params(self, params: dict) -> dict:
         params = dict(params)
         params["timestamp"] = int(time.time() * 1000)
@@ -150,3 +153,18 @@ class BingXRealExecutor:
             )
 
         return positions
+
+    def test_connection(self):
+        if not self.has_credentials():
+            return {"enabled": self.enabled, "ok": False, "reason": "missing_bingx_credentials"}
+
+        try:
+            payload = self._get("/openApi/swap/v2/user/positions", {})
+            return {
+                "enabled": self.enabled,
+                "ok": True,
+                "reason": "ok",
+                "raw_keys": list(payload.keys()) if isinstance(payload, dict) else [],
+            }
+        except Exception as e:
+            return {"enabled": self.enabled, "ok": False, "reason": str(e)}

@@ -35,11 +35,19 @@ def _get_str(name: str, default: str) -> str:
     return raw
 
 
+def _get_str_list(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 EXECUTION_MODE = _get_str("EXECUTION_MODE", "paper")
 
 TELEGRAM_ENABLED = _get_bool("TELEGRAM_ENABLED", True)
 TELEGRAM_BOT_TOKEN = _get_str("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = _get_str("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_IDS = _get_str_list("TELEGRAM_CHAT_IDS")
 
 BINGX_ENABLED = _get_bool("BINGX_ENABLED", False)
 BINGX_API_KEY = _get_str("BINGX_API_KEY", "")
@@ -48,7 +56,6 @@ BINGX_BASE_URL = _get_str("BINGX_BASE_URL", "https://open-api.bingx.com")
 
 TOP_SYMBOLS_COUNT = _get_int("TOP_SYMBOLS_COUNT", 40)
 SCAN_INTERVAL_SECONDS = _get_int("SCAN_INTERVAL_SECONDS", 300)
-MIN_VOLUME_FILTER = _get_float("MIN_VOLUME_FILTER", 5_000_000)
 
 START_BALANCE_USDT = _get_float("START_BALANCE_USDT", 100.0)
 MAX_OPEN_POSITIONS = _get_int("MAX_OPEN_POSITIONS", 10)
@@ -63,65 +70,19 @@ TAKE_PROFIT_PCT = _get_float("TAKE_PROFIT_PCT", 0.05)
 LEVERAGE_MODE = _get_str("LEVERAGE_MODE", "fixed")
 FIXED_LEVERAGE = _get_int("FIXED_LEVERAGE", 20)
 
-SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-    "BNBUSDT",
-    "XRPUSDT",
-    "AVAXUSDT",
-    "LINKUSDT",
-    "ADAUSDT",
-    "DOGEUSDT",
-    "LTCUSDT",
-    "DOTUSDT",
-    "MATICUSDT",
-    "ATOMUSDT",
-    "APTUSDT",
-    "NEARUSDT",
-    "ARBUSDT",
-    "OPUSDT",
-    "INJUSDT",
-    "SUIUSDT",
-    "SEIUSDT",
-    "FILUSDT",
-    "TRXUSDT",
-    "ETCUSDT",
-    "AAVEUSDT",
-    "UNIUSDT",
-    "XLMUSDT",
-    "ALGOUSDT",
-    "VETUSDT",
-    "ICPUSDT",
-    "RUNEUSDT",
-]
-
 BINANCE_WS_BASE = _get_str("BINANCE_WS_BASE", "wss://fstream.binance.com")
-BINANCE_REST_BASE = _get_str("BINANCE_REST_BASE", "https://fapi.binance.com")
 BYBIT_REST_BASE = _get_str("BYBIT_REST_BASE", "https://api.bybit.com")
-
-LARGE_TRADE_USD = _get_float("LARGE_TRADE_USD", 30000)
-TRADE_WINDOW_SECONDS = _get_int("TRADE_WINDOW_SECONDS", 45)
-
-PATTERN_ENABLED = _get_bool("PATTERN_ENABLED", True)
 INVERT_SIGNALS = _get_bool("INVERT_SIGNALS", False)
 
 HEARTBEAT_SECONDS = _get_int("HEARTBEAT_SECONDS", 60)
 COOLDOWN_SECONDS = _get_int("COOLDOWN_SECONDS", 300)
 MAX_SILENCE_SECONDS = _get_int("MAX_SILENCE_SECONDS", 60)
 
-MIN_SYMBOL_PRICE = _get_float("MIN_SYMBOL_PRICE", 0.01)
-MIN_QUOTE_VOLUME = _get_float("MIN_QUOTE_VOLUME", 10_000_000)
-
 ANTI_FOMO_ENABLED = _get_bool("ANTI_FOMO_ENABLED", True)
 ANTI_FOMO_LOOKBACK = _get_int("ANTI_FOMO_LOOKBACK", 5)
 ANTI_FOMO_MAX_MOVE_PCT = _get_float("ANTI_FOMO_MAX_MOVE_PCT", 0.025)
 
 STOPLOSS_COOLDOWN_SECONDS = _get_int("STOPLOSS_COOLDOWN_SECONDS", 3600)
-
-WEAK_SIGNAL_POSITION_MULTIPLIER = _get_float("WEAK_SIGNAL_POSITION_MULTIPLIER", 0.5)
-MEDIUM_SIGNAL_POSITION_MULTIPLIER = _get_float("MEDIUM_SIGNAL_POSITION_MULTIPLIER", 0.75)
-STRONG_SIGNAL_POSITION_MULTIPLIER = _get_float("STRONG_SIGNAL_POSITION_MULTIPLIER", 1.0)
 
 LOW_PRICE_COIN_THRESHOLD = _get_float("LOW_PRICE_COIN_THRESHOLD", 0.10)
 LOW_PRICE_REQUIRES_RETEST = _get_bool("LOW_PRICE_REQUIRES_RETEST", True)

@@ -15,6 +15,7 @@ from config import (
     TELEGRAM_ENABLED,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
+    TELEGRAM_CHAT_IDS,
     BINGX_ENABLED,
     BINGX_API_KEY,
     BINGX_SECRET_KEY,
@@ -97,6 +98,7 @@ class SmartMomentumPaperBot:
         self.notifier = TelegramNotifier(
             bot_token=TELEGRAM_BOT_TOKEN,
             chat_id=TELEGRAM_CHAT_ID,
+            chat_ids=TELEGRAM_CHAT_IDS,
             enabled=TELEGRAM_ENABLED,
         )
 
@@ -113,6 +115,7 @@ class SmartMomentumPaperBot:
 
         self.restore_runtime_state()
         self.sync_with_exchange_state()
+        self.check_integrations()
 
         self.notifier.send("🤖 Бот запущен")
 
@@ -151,6 +154,25 @@ class SmartMomentumPaperBot:
         if symbol in {"BTCUSDT", "ETHUSDT"}:
             return "CORE"
         return "ALT"
+
+    def check_integrations(self):
+        tg_result = self.notifier.test_connection()
+        if tg_result.get("ok"):
+            log_green("TELEGRAM connection ok")
+        else:
+            log_yellow(f"TELEGRAM connection issue | reason={tg_result.get('reason')}")
+
+        if BINGX_ENABLED:
+            bingx_result = self.executor.test_connection()
+            if bingx_result.get("ok"):
+                mode = "trade-enabled" if EXECUTION_MODE == "real" else "connected-paper"
+                log_green(f"BINGX connection ok | mode={mode}")
+                if TELEGRAM_ENABLED:
+                    self.notifier.send(f"✅ BINGX connected ({mode})")
+            else:
+                log_yellow(f"BINGX connection issue | reason={bingx_result.get('reason')}")
+                if TELEGRAM_ENABLED:
+                    self.notifier.send(f"⚠️ BINGX connection issue: {bingx_result.get('reason')}")
 
     def _empty_position_slot(self, symbol: str):
         if symbol not in self.positions:
