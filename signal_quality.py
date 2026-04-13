@@ -35,13 +35,13 @@ def classify_signal_quality(
     if strong_htf:
         reasons.append("htf")
 
-    if retest_confirmation and volume_confirmed and structure_ok and strong_htf and score >= 0.45:
+    if retest_confirmation and volume_confirmed and structure_ok and strong_htf and score >= 0.40:
         return "A", reasons
 
-    if (breakout_confirmation or trendline_confirmation) and structure_ok and score >= 0.38:
+    if (breakout_confirmation or trendline_confirmation) and structure_ok and score >= 0.34:
         return "B", reasons
 
-    if (fast_move or acceleration) and score >= 0.35:
+    if (fast_move or acceleration) and score >= 0.30:
         return "C", reasons
 
     return "REJECT", reasons

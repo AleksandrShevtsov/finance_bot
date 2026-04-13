@@ -43,6 +43,13 @@ class BingXRealExecutor:
         response.raise_for_status()
         return response.json()
 
+    def _get(self, path: str, params: dict):
+        url = f"{self.base_url}{path}"
+        signed = self._sign_params(params)
+        response = self.session.get(url, params=signed, timeout=15)
+        response.raise_for_status()
+        return response.json()
+
     def set_leverage(self, symbol: str, side: str, leverage: int):
         if not self.enabled:
             return {"mode": "paper", "action": "set_leverage", "symbol": symbol, "side": side, "leverage": leverage}
@@ -79,6 +86,30 @@ class BingXRealExecutor:
 
         return self._post("/openApi/swap/v2/trade/order", params)
 
+    def reduce_position(self, symbol: str, side: str, quantity: float, position_side: str = None):
+        if not self.enabled:
+            return {
+                "mode": "paper",
+                "action": "reduce_position",
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "position_side": position_side,
+            }
+
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": "MARKET",
+            "quantity": quantity,
+            "reduceOnly": True,
+        }
+
+        if position_side:
+            params["positionSide"] = position_side
+
+        return self._post("/openApi/swap/v2/trade/order", params)
+
     def close_all_positions(self, symbol: str = None):
         if not self.enabled:
             return {"mode": "paper", "action": "close_all_positions", "symbol": symbol}
@@ -88,3 +119,34 @@ class BingXRealExecutor:
             params["symbol"] = symbol
 
         return self._post("/openApi/swap/v2/trade/closeAllPositions", params)
+
+    def fetch_open_positions(self):
+        if not self.enabled:
+            return []
+
+        payload = self._get("/openApi/swap/v2/user/positions", {})
+        rows = payload.get("data") or payload.get("result") or []
+        positions = []
+
+        for row in rows:
+            try:
+                amount = abs(float(row.get("positionAmt", row.get("availableAmt", 0)) or 0))
+            except Exception:
+                amount = 0.0
+
+            if amount <= 0:
+                continue
+
+            side = row.get("positionSide") or row.get("side") or ""
+            entry_price = float(row.get("avgPrice", row.get("entryPrice", 0)) or 0)
+            positions.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "position_side": side,
+                    "qty": amount,
+                    "entry_price": entry_price,
+                    "raw": row,
+                }
+            )
+
+        return positions

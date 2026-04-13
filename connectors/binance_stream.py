@@ -33,6 +33,14 @@ class BinanceMarketFeed:
         self._running = True
         threading.Thread(target=self._run_forever, daemon=True).start()
 
+    def stop(self):
+        self._running = False
+        try:
+            if self.ws is not None:
+                self.ws.close()
+        except Exception:
+            pass
+
     def _run_forever(self):
         while self._running:
             try:

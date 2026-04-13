@@ -1,4 +1,4 @@
-def breakout_volume_confirms(candles, volume_multiplier=1.5, avg_lookback=20):
+def breakout_volume_confirms(candles, volume_multiplier=1.2, avg_lookback=15):
     if candles is None or len(candles) < avg_lookback + 1:
         return False, 0.0, 0.0
 

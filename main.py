@@ -8,6 +8,8 @@ from entry_filters import blocked_by_anti_fomo
 from late_entry_filters import is_low_price_coin, blocked_by_extension
 from telegram_notifier import TelegramNotifier
 from executors.bingx_real_executor import BingXRealExecutor
+from connectors.binance_stream import BinanceMarketFeed
+from connectors.bybit_client import BybitOIClient
 from config import (
     EXECUTION_MODE,
     TELEGRAM_ENABLED,
@@ -28,7 +30,11 @@ from config import (
     TOP_SYMBOLS_COUNT,
     SCAN_INTERVAL_SECONDS,
     START_BALANCE_USDT,
+    FIXED_MARGIN_PCT,
     MAX_OPEN_POSITIONS,
+    DAILY_LOSS_LIMIT_USDT,
+    MAX_CONSECUTIVE_LOSSES,
+    MAX_TOTAL_DRAWDOWN_PCT,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
     INVERT_SIGNALS,
@@ -36,13 +42,16 @@ from config import (
     COOLDOWN_SECONDS,
     STOPLOSS_COOLDOWN_SECONDS,
     LOW_PRICE_REQUIRES_RETEST,
+    BINANCE_WS_BASE,
+    BYBIT_REST_BASE,
+    MAX_SILENCE_SECONDS,
 )
 from utils import log, log_green, log_red, log_yellow, log_cyan
 from exchange_momentum_scanner import ExchangeMomentumScanner
 from binance_candles_feed import fetch_klines
 from htf_trend_filter import detect_htf_trend
-from breakout_detector import detect_range_breakout
-from trendline_detector import detect_trendline_breakout
+from breakout_detector import detect_range_breakout, confirm_breakout_with_orderflow
+from trendline_detector import detect_trendline_breakout, confirm_trendline_breakout
 from retest_detector import detect_retest_after_breakout
 from fast_move_detector import detect_fast_move
 from acceleration_detector import detect_price_acceleration
@@ -50,6 +59,10 @@ from strategy import build_signal
 from position_manager import PositionManager
 from smart_exit_manager import SmartExitManager
 from trade_history import ensure_history_files, append_trade
+from bot_state_store import BotStateStore
+from feed_health import FeedHealthMonitor
+from risk_guard import RiskGuard
+from exchange_state_sync import ExchangeStateSync
 
 
 class SmartMomentumPaperBot:
@@ -63,9 +76,17 @@ class SmartMomentumPaperBot:
         self.cooldown_until = {}
         self.last_signal = {}
         self.last_heartbeat = 0.0
+        self.market_feed = None
+        self.oi_client = BybitOIClient(rest_base=BYBIT_REST_BASE)
+        self.state_store = BotStateStore()
+        self.feed_health = FeedHealthMonitor(max_feed_silence_seconds=MAX_SILENCE_SECONDS)
+        self.risk_guard = RiskGuard(
+            daily_loss_limit_usdt=DAILY_LOSS_LIMIT_USDT,
+            max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
+            max_total_drawdown_pct=MAX_TOTAL_DRAWDOWN_PCT,
+        )
 
-        # Оставляю твой текущий риск-процент
-        self.position_manager = PositionManager(entry_pct=0.1)
+        self.position_manager = PositionManager(entry_pct=FIXED_MARGIN_PCT)
         self.exit_manager = SmartExitManager()
 
         self.notifier = TelegramNotifier(
@@ -80,6 +101,13 @@ class SmartMomentumPaperBot:
             enabled=(EXECUTION_MODE == "real" and BINGX_ENABLED),
             base_url=BINGX_BASE_URL,
         )
+        self.exchange_sync = ExchangeStateSync(
+            executor=self.executor,
+            enabled=(EXECUTION_MODE == "real" and BINGX_ENABLED),
+        )
+
+        self.restore_runtime_state()
+        self.sync_with_exchange_state()
 
         self.notifier.send("🤖 Бот запущен")
 
@@ -92,17 +120,144 @@ class SmartMomentumPaperBot:
             return "BUY"
         return side
 
+    def configure_market_feed(self):
+        desired = list(self.symbols)
+        if not desired:
+            return
+
+        current = self.market_feed.symbols if self.market_feed is not None else []
+        if current == desired:
+            return
+
+        if self.market_feed is not None:
+            self.market_feed.stop()
+
+        self.market_feed = BinanceMarketFeed(desired, ws_base=BINANCE_WS_BASE)
+        self.market_feed.start()
+        log_cyan(f"ORDERFLOW FEED started for {len(desired)} symbols")
+
+    def _exchange_position_side(self, side: str) -> str:
+        return "LONG" if side == "BUY" else "SHORT"
+
+    def _exchange_close_side(self, side: str) -> str:
+        return "SELL" if side == "BUY" else "BUY"
+
+    def _empty_position_slot(self, symbol: str):
+        if symbol not in self.positions:
+            self.positions[symbol] = None
+        if symbol not in self.cooldown_until:
+            self.cooldown_until[symbol] = 0
+        if symbol not in self.last_signal:
+            self.last_signal[symbol] = "NONE"
+
+    def serialize_positions(self):
+        data = {}
+        for symbol, pos in self.positions.items():
+            if pos is not None:
+                data[symbol] = pos
+        return data
+
+    def save_runtime_state(self):
+        self.state_store.save(
+            {
+                "balance": self.balance,
+                "positions": self.serialize_positions(),
+                "cooldown_until": self.cooldown_until,
+                "last_signal": self.last_signal,
+                "risk_guard": self.risk_guard.snapshot(),
+            }
+        )
+
+    def restore_runtime_state(self):
+        state = self.state_store.load()
+        if not state:
+            self.risk_guard.initialize_balance(self.balance)
+            return
+
+        self.balance = float(state.get("balance", self.balance))
+        self.positions = state.get("positions", {}) or {}
+        self.cooldown_until = state.get("cooldown_until", {}) or {}
+        self.last_signal = state.get("last_signal", {}) or {}
+        self.risk_guard.hydrate(state.get("risk_guard", {}) or {})
+        self.risk_guard.initialize_balance(self.balance)
+
+    def sync_with_exchange_state(self):
+        remote = self.exchange_sync.map_by_symbol()
+        if not remote:
+            self.save_runtime_state()
+            return
+
+        for symbol in list(self.positions.keys()):
+            pos = self.positions.get(symbol)
+            if pos is None:
+                continue
+            if symbol not in remote:
+                log_yellow(f"SYNC CLEAR {symbol} | reason=missing_on_exchange")
+                self.positions[symbol] = None
+
+        for symbol, remote_pos in remote.items():
+            self._empty_position_slot(symbol)
+            local = self.positions.get(symbol)
+            if local is not None:
+                continue
+
+            qty = float(remote_pos.get("qty", 0.0) or 0.0)
+            entry = float(remote_pos.get("entry_price", 0.0) or 0.0)
+            position_side = str(remote_pos.get("position_side", "")).upper()
+            side = "BUY" if "LONG" in position_side else "SELL"
+
+            self.positions[symbol] = {
+                "side": side,
+                "entry": entry,
+                "qty": qty,
+                "stop": entry,
+                "take": entry,
+                "leverage": 1,
+                "margin": 0.0,
+                "notional": qty * entry,
+                "risk_usdt": 0.0,
+                "level_data": None,
+                "be_moved": False,
+                "partial_done": False,
+                "trail_active": False,
+                "opened_at": time.time(),
+                "reason": "restored_from_exchange",
+                "signal_score": 0.0,
+                "signal_class": "SYNCED",
+                "external_sync_only": True,
+            }
+            log_yellow(f"SYNC RESTORE {symbol} | side={side} | qty={qty:.4f} | entry={entry:.4f}")
+
+        self.save_runtime_state()
+
+    def _sync_reduce_on_exchange(self, symbol, pos, quantity):
+        if EXECUTION_MODE != "real" or not BINGX_ENABLED:
+            return True
+
+        reduce_qty = round(quantity, 6)
+        if reduce_qty <= 0:
+            return False
+
+        try:
+            self.executor.reduce_position(
+                symbol=symbol,
+                side=self._exchange_close_side(pos["side"]),
+                quantity=reduce_qty,
+                position_side=self._exchange_position_side(pos["side"]),
+            )
+            return True
+        except Exception as e:
+            log_red(f"REAL CLOSE ERROR {symbol}: {e}")
+            self.notifier.send(f"❌ REAL CLOSE ERROR {symbol}: {e}")
+            return False
+
     def update_symbols(self):
         self.symbols = self.scanner.get_top_symbols(TOP_SYMBOLS_COUNT)
+        self.configure_market_feed()
 
         log_cyan("UPDATED SYMBOL LIST:")
         for s in self.symbols:
-            if s not in self.positions:
-                self.positions[s] = None
-            if s not in self.cooldown_until:
-                self.cooldown_until[s] = 0
-            if s not in self.last_signal:
-                self.last_signal[s] = "NONE"
+            self._empty_position_slot(s)
             print(" -", s)
 
     def count_open_positions(self):
@@ -114,6 +269,11 @@ class SmartMomentumPaperBot:
 
         if self.count_open_positions() >= MAX_OPEN_POSITIONS:
             log_yellow(f"SKIP {symbol} | reason=max_open_positions")
+            return
+
+        allowed, risk_reason = self.risk_guard.can_open_new_position(self.balance)
+        if not allowed:
+            log_yellow(f"SKIP {symbol} | reason={risk_reason}")
             return
 
         pos = self.position_manager.build_position(
@@ -161,7 +321,7 @@ class SmartMomentumPaperBot:
 
         if EXECUTION_MODE == "real" and BINGX_ENABLED:
             try:
-                leverage_side = "LONG" if side == "BUY" else "SHORT"
+                leverage_side = self._exchange_position_side(side)
                 self.executor.set_leverage(symbol, leverage_side, int(pos["leverage"]))
                 self.executor.place_market_order(
                     symbol=symbol,
@@ -171,7 +331,9 @@ class SmartMomentumPaperBot:
                 )
                 self.notifier.send(f"✅ REAL ORDER SENT {symbol} {side}")
             except Exception as e:
+                self.positions[symbol] = None
                 self.notifier.send(f"❌ REAL ORDER ERROR {symbol}: {e}")
+                return
 
         level_data = pos.get("level_data")
         if level_data:
@@ -181,10 +343,15 @@ class SmartMomentumPaperBot:
                 f"rr={level_data['rr']:.2f}"
             )
 
+        self.save_runtime_state()
+
     def close_position(self, symbol, price, reason):
         pos = self.positions.get(symbol)
 
         if pos is None:
+            return
+
+        if not self._sync_reduce_on_exchange(symbol, pos, pos["qty"]):
             return
 
         if pos["side"] == "BUY":
@@ -232,6 +399,9 @@ class SmartMomentumPaperBot:
         else:
             self.cooldown_until[symbol] = time.time() + COOLDOWN_SECONDS
 
+        self.risk_guard.register_closed_trade(pnl, self.balance)
+        self.save_runtime_state()
+
     def partial_close(self, symbol, price):
         pos = self.positions.get(symbol)
 
@@ -244,6 +414,9 @@ class SmartMomentumPaperBot:
         qty_left = pos["qty"] - qty_close
 
         if qty_close <= 0 or qty_left <= 0:
+            return
+
+        if not self._sync_reduce_on_exchange(symbol, pos, qty_close):
             return
 
         if pos["side"] == "BUY":
@@ -287,9 +460,13 @@ class SmartMomentumPaperBot:
             f"Balance: {self.balance:.2f}"
         )
 
+        self.save_runtime_state()
+
     def manage_position(self, symbol, current_price, signal_side):
         pos = self.positions.get(symbol)
         if pos is None or current_price is None:
+            return
+        if pos.get("external_sync_only"):
             return
 
         if self.exit_manager.should_be_and_partial_on_profit(pos, current_price):
@@ -409,15 +586,42 @@ class SmartMomentumPaperBot:
         fast_move = detect_fast_move(candles)
         acceleration = detect_price_acceleration(candles)
 
-        breakout_confirmation = breakout
-        trendline_confirmation = trendline
-        retest_confirmation = retest
-        pattern = None
-
         trades = []
         imbalance = 0.0
-        oi_now = None
-        oi_prev = None
+        if self.market_feed is not None:
+            trades, _, imbalance = self.market_feed.snapshot(symbol)
+
+        oi_now, oi_prev = self.oi_client.get_oi_pair(symbol)
+        self.feed_health.note_oi(symbol, oi_now)
+
+        feed_ready = self.feed_health.feed_ready(self.market_feed)
+        symbol_ready = self.feed_health.symbol_ready(self.market_feed, symbol)
+        oi_ready = self.feed_health.oi_ready(symbol)
+
+        if not symbol_ready:
+            trades = []
+            imbalance = 0.0
+        if not oi_ready:
+            oi_now = None
+            oi_prev = None
+
+        breakout_confirmation = confirm_breakout_with_orderflow(
+            trades=trades,
+            imbalance=imbalance,
+            oi_now=oi_now,
+            oi_prev=oi_prev,
+            breakout=breakout,
+        ) or breakout
+
+        trendline_confirmation = confirm_trendline_breakout(
+            trades=trades,
+            imbalance=imbalance,
+            oi_now=oi_now,
+            oi_prev=oi_prev,
+            breakout=trendline,
+        ) or trendline
+        retest_confirmation = retest
+        pattern = None
 
         sig = build_signal(
             symbol=symbol,
@@ -485,6 +689,17 @@ class SmartMomentumPaperBot:
             return
 
         if sig.side in ("BUY", "SELL"):
+            if not feed_ready:
+                log_yellow(f"BLOCKED {symbol} | reason=feed_not_ready")
+                return
+            if not symbol_ready:
+                log_yellow(f"BLOCKED {symbol} | reason=symbol_feed_warmup")
+                return
+            if not oi_ready:
+                log_yellow(f"BLOCKED {symbol} | reason=oi_not_ready")
+                return
+
+        if sig.side in ("BUY", "SELL"):
             if sig.signal_class == "REJECT":
                 log_yellow(f"BLOCKED {symbol} | reason=signal_class_reject")
                 return
@@ -550,10 +765,17 @@ class SmartMomentumPaperBot:
             )
 
     def heartbeat(self):
+        if self.market_feed is not None:
+            self.market_feed.ensure_alive(MAX_SILENCE_SECONDS)
+        self.sync_with_exchange_state()
+        can_trade, risk_reason = self.risk_guard.can_open_new_position(self.balance)
         log_cyan(
-            f"heartbeat | balance={self.balance:.2f} | open={self.count_open_positions()}/{MAX_OPEN_POSITIONS} | mode={EXECUTION_MODE}"
+            f"heartbeat | balance={self.balance:.2f} | open={self.count_open_positions()}/{MAX_OPEN_POSITIONS} | "
+            f"mode={EXECUTION_MODE} | feed_ready={self.feed_health.feed_ready(self.market_feed)} | "
+            f"trading_enabled={can_trade}{'' if can_trade else f' | reason={risk_reason}'}"
         )
         self.print_open_positions()
+        self.save_runtime_state()
 
     def run(self):
         log("Smart Momentum Paper Bot started")
