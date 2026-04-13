@@ -63,6 +63,11 @@ from bot_state_store import BotStateStore
 from feed_health import FeedHealthMonitor
 from risk_guard import RiskGuard
 from exchange_state_sync import ExchangeStateSync
+from volatility_regime import market_regime, adaptive_threshold
+from oi_context import classify_oi_price_context
+from liquidity_levels import build_volume_profile, nearest_level, detect_liquidity_sweep, is_false_breakout
+from time_filters import trading_window_allows_entry
+from confirmation_filters import multi_bar_breakout_confirmation
 
 
 class SmartMomentumPaperBot:
@@ -141,6 +146,11 @@ class SmartMomentumPaperBot:
 
     def _exchange_close_side(self, side: str) -> str:
         return "SELL" if side == "BUY" else "BUY"
+
+    def _symbol_profile(self, symbol: str) -> str:
+        if symbol in {"BTCUSDT", "ETHUSDT"}:
+            return "CORE"
+        return "ALT"
 
     def _empty_position_slot(self, symbol: str):
         if symbol not in self.positions:
@@ -263,7 +273,7 @@ class SmartMomentumPaperBot:
     def count_open_positions(self):
         return sum(1 for pos in self.positions.values() if pos is not None)
 
-    def open_position(self, symbol, side, entry_price, score, reason, candles, signal_class="REJECT"):
+    def open_position(self, symbol, side, entry_price, score, reason, candles, signal_class="REJECT", strategy_meta=None):
         if self.positions.get(symbol) is not None:
             return
 
@@ -290,6 +300,8 @@ class SmartMomentumPaperBot:
         pos["reason"] = reason
         pos["signal_score"] = score
         pos["signal_class"] = signal_class
+        if strategy_meta:
+            pos.update(strategy_meta)
 
         self.positions[symbol] = pos
 
@@ -462,7 +474,7 @@ class SmartMomentumPaperBot:
 
         self.save_runtime_state()
 
-    def manage_position(self, symbol, current_price, signal_side):
+    def manage_position(self, symbol, current_price, signal_side, orderflow_bias=0.0, oi_bias=0.0):
         pos = self.positions.get(symbol)
         if pos is None or current_price is None:
             return
@@ -510,6 +522,10 @@ class SmartMomentumPaperBot:
             self.close_position(symbol, current_price, "early_exit_no_followthrough")
             return
 
+        if self.exit_manager.should_take_liquidity_target(pos, current_price):
+            self.close_position(symbol, current_price, "liquidity_target")
+            return
+
         if pos["side"] == "BUY":
             if current_price <= pos["stop"]:
                 self.close_position(symbol, current_price, "stop_loss")
@@ -527,6 +543,10 @@ class SmartMomentumPaperBot:
 
         hold_seconds = self.exit_manager.hold_seconds_for_position(pos)
         if time.time() - pos["opened_at"] < hold_seconds:
+            return
+
+        if self.exit_manager.should_exit_on_adverse_flow(pos, orderflow_bias=orderflow_bias, oi_bias=oi_bias):
+            self.close_position(symbol, current_price, "adverse_flow_exit")
             return
 
         if pos["side"] == "BUY" and signal_side == "SELL":
@@ -566,25 +586,72 @@ class SmartMomentumPaperBot:
         htf_trend = detect_htf_trend(symbol)
 
         candles = fetch_klines(symbol, "15m", 200)
-        if not candles:
+        if not candles or len(candles) < 50:
+            log_yellow(f"SKIP {symbol} | reason=not_enough_candles")
             return
 
         structure = detect_market_structure(candles)
         volume_confirmed, last_vol, avg_vol = breakout_volume_confirms(candles)
 
         current_price = candles[-1]["close"]
+        regime = market_regime(candles)
+        symbol_profile = self._symbol_profile(symbol)
 
-        breakout = detect_range_breakout(candles)
-        trendline = detect_trendline_breakout(candles)
+        breakout_pct = adaptive_threshold(0.0015, regime.get("atr_pct", 0.0), floor_mult=0.7, cap_mult=1.8)
+        retest_tolerance = adaptive_threshold(0.0015, regime.get("atr_pct", 0.0), floor_mult=0.75, cap_mult=1.7)
+
+        try:
+            breakout = detect_range_breakout(candles, lookback=20, breakout_pct=breakout_pct)
+        except Exception as e:
+            log_yellow(f"SOFT FAIL {symbol} | module=breakout | error={e}")
+            breakout = None
+
+        try:
+            trendline = detect_trendline_breakout(
+                candles,
+                confluence_threshold_pct=adaptive_threshold(0.002, regime.get("atr_pct", 0.0)),
+            )
+        except Exception as e:
+            log_yellow(f"SOFT FAIL {symbol} | module=trendline | error={e}")
+            trendline = None
 
         retest = None
         if trendline:
-            retest = detect_retest_after_breakout(candles, trendline)
+            try:
+                retest = detect_retest_after_breakout(candles, trendline, tolerance_pct=retest_tolerance)
+            except Exception as e:
+                log_yellow(f"SOFT FAIL {symbol} | module=retest_trendline | error={e}")
+                retest = None
         elif breakout:
-            retest = detect_retest_after_breakout(candles, breakout)
+            try:
+                retest = detect_retest_after_breakout(candles, breakout, tolerance_pct=retest_tolerance)
+            except Exception as e:
+                log_yellow(f"SOFT FAIL {symbol} | module=retest_breakout | error={e}")
+                retest = None
 
-        fast_move = detect_fast_move(candles)
-        acceleration = detect_price_acceleration(candles)
+        try:
+            fast_move = detect_fast_move(candles)
+        except Exception as e:
+            log_yellow(f"SOFT FAIL {symbol} | module=fast_move | error={e}")
+            fast_move = None
+
+        try:
+            acceleration = detect_price_acceleration(candles)
+        except Exception as e:
+            log_yellow(f"SOFT FAIL {symbol} | module=acceleration | error={e}")
+            acceleration = None
+
+        try:
+            liquidity_sweep = detect_liquidity_sweep(candles, lookback=20)
+        except Exception as e:
+            log_yellow(f"SOFT FAIL {symbol} | module=liquidity_sweep | error={e}")
+            liquidity_sweep = None
+
+        try:
+            volume_profile = build_volume_profile(candles, bins=24, lookback=80)
+        except Exception as e:
+            log_yellow(f"SOFT FAIL {symbol} | module=volume_profile | error={e}")
+            volume_profile = {"bins": [], "hvn": [], "lvn": []}
 
         trades = []
         imbalance = 0.0
@@ -593,6 +660,7 @@ class SmartMomentumPaperBot:
 
         oi_now, oi_prev = self.oi_client.get_oi_pair(symbol)
         self.feed_health.note_oi(symbol, oi_now)
+        oi_context = classify_oi_price_context(candles, oi_now, oi_prev, lookback=4)
 
         feed_ready = self.feed_health.feed_ready(self.market_feed)
         symbol_ready = self.feed_health.symbol_ready(self.market_feed, symbol)
@@ -620,6 +688,9 @@ class SmartMomentumPaperBot:
             oi_prev=oi_prev,
             breakout=trendline,
         ) or trendline
+
+        breakout_multi_bar = multi_bar_breakout_confirmation(candles, breakout_confirmation, bars=2)
+        trendline_multi_bar = multi_bar_breakout_confirmation(candles, trendline_confirmation, bars=2)
         retest_confirmation = retest
         pattern = None
 
@@ -633,7 +704,16 @@ class SmartMomentumPaperBot:
             breakout_confirmation=breakout_confirmation,
             trendline_confirmation=trendline_confirmation,
             retest_confirmation=retest_confirmation,
+            regime=regime,
+            oi_context=oi_context,
+            liquidity_sweep=liquidity_sweep,
+            htf_trend=htf_trend,
+            structure=structure,
+            symbol_profile=symbol_profile,
         )
+
+        orderflow_bias = sig.components.get("orderflow", 0.0)
+        oi_bias = sig.components.get("oi", 0.0)
 
         if fast_move and sig.side != "HOLD" and fast_move["direction"] == sig.side:
             sig.score = max(sig.score, 0.42)
@@ -658,14 +738,17 @@ class SmartMomentumPaperBot:
         signal_class, quality_reasons = classify_signal_quality(
             side=sig.side,
             score=sig.score,
-            breakout_confirmation=breakout,
-            trendline_confirmation=trendline,
+            breakout_confirmation=breakout_confirmation,
+            trendline_confirmation=trendline_confirmation,
             retest_confirmation=retest,
             fast_move=fast_move,
             acceleration=acceleration,
             htf_trend=htf_trend,
             volume_confirmed=volume_confirmed,
             structure_ok=structure_ok,
+            regime_name=regime.get("name"),
+            liquidity_sweep=liquidity_sweep,
+            multi_bar_confirmed=(breakout_multi_bar or trendline_multi_bar or retest_confirmation is not None),
         )
 
         sig.signal_class = signal_class
@@ -677,12 +760,12 @@ class SmartMomentumPaperBot:
         if self.last_signal.get(symbol) != sig.side:
             log(
                 f"{symbol} signal {self.last_signal.get(symbol, 'NONE')} -> {sig.side} | "
-                f"trend={htf_trend} | class={sig.signal_class} | score={sig.score:.3f} | reason={sig.reason}"
+                f"trend={htf_trend} | regime={regime.get('name')} | class={sig.signal_class} | score={sig.score:.3f} | reason={sig.reason}"
             )
             self.last_signal[symbol] = sig.side
 
         if self.positions.get(symbol) is not None:
-            self.manage_position(symbol, current_price, sig.side)
+            self.manage_position(symbol, current_price, sig.side, orderflow_bias=orderflow_bias, oi_bias=oi_bias)
             return
 
         if time.time() < self.cooldown_until.get(symbol, 0):
@@ -699,12 +782,21 @@ class SmartMomentumPaperBot:
                 log_yellow(f"BLOCKED {symbol} | reason=oi_not_ready")
                 return
 
+            allowed_time, time_reason = trading_window_allows_entry(symbol)
+            if not allowed_time:
+                log_yellow(f"BLOCKED {symbol} | reason={time_reason}")
+                return
+
+            if regime.get("name") == "high_volatility_panic":
+                log_yellow(f"BLOCKED {symbol} | reason=panic_regime")
+                return
+
         if sig.side in ("BUY", "SELL"):
             if sig.signal_class == "REJECT":
                 log_yellow(f"BLOCKED {symbol} | reason=signal_class_reject")
                 return
 
-            if breakout and not volume_confirmed:
+            if breakout_confirmation and not volume_confirmed:
                 log_yellow(
                     f"BLOCKED {symbol} | reason=breakout_no_volume | last_vol={last_vol:.2f} | avg_vol={avg_vol:.2f}"
                 )
@@ -712,6 +804,22 @@ class SmartMomentumPaperBot:
 
             if not structure_ok:
                 log_yellow(f"BLOCKED {symbol} | reason=structure_filter | trend={structure['trend']}")
+                return
+
+            if breakout_confirmation and not breakout_multi_bar and retest_confirmation is None:
+                log_yellow(f"BLOCKED {symbol} | reason=breakout_not_held")
+                return
+
+            if trendline_confirmation and not trendline_multi_bar and retest_confirmation is None:
+                log_yellow(f"BLOCKED {symbol} | reason=trendline_not_held")
+                return
+
+            if is_false_breakout(candles, breakout_confirmation) or is_false_breakout(candles, trendline_confirmation):
+                log_yellow(f"BLOCKED {symbol} | reason=false_breakout")
+                return
+
+            if symbol_profile == "ALT" and liquidity_sweep is None and retest_confirmation is None and sig.signal_class != "A":
+                log_yellow(f"BLOCKED {symbol} | reason=alt_needs_reclaim_context")
                 return
 
         if LOW_PRICE_REQUIRES_RETEST:
@@ -753,6 +861,16 @@ class SmartMomentumPaperBot:
                     return
 
             entry_price = sig.entry_price if sig.entry_price else current_price
+            liquidity_target = nearest_level(entry_price, volume_profile.get("hvn", []), sig.side)
+            strategy_meta = {
+                "regime": regime.get("name"),
+                "signal_components": sig.components,
+                "orderflow_bias": orderflow_bias,
+                "oi_bias": oi_bias,
+                "liquidity_target": liquidity_target,
+                "volume_profile_hvn": volume_profile.get("hvn", [])[:5],
+                "volume_profile_lvn": volume_profile.get("lvn", [])[:5],
+            }
 
             self.open_position(
                 symbol=symbol,
@@ -762,6 +880,7 @@ class SmartMomentumPaperBot:
                 reason=sig.reason,
                 candles=candles,
                 signal_class=sig.signal_class,
+                strategy_meta=strategy_meta,
             )
 
     def heartbeat(self):

@@ -9,6 +9,9 @@ def classify_signal_quality(
     htf_trend=None,
     volume_confirmed=False,
     structure_ok=False,
+    regime_name=None,
+    liquidity_sweep=None,
+    multi_bar_confirmed=False,
 ):
     reasons = []
 
@@ -26,6 +29,10 @@ def classify_signal_quality(
         reasons.append("volume")
     if structure_ok:
         reasons.append("structure")
+    if liquidity_sweep and liquidity_sweep.get("direction") == side:
+        reasons.append("liquidity")
+    if multi_bar_confirmed:
+        reasons.append("hold")
 
     strong_htf = (
         (side == "BUY" and htf_trend == "BULL") or
@@ -34,14 +41,16 @@ def classify_signal_quality(
 
     if strong_htf:
         reasons.append("htf")
+    if regime_name:
+        reasons.append(f"regime:{regime_name}")
 
-    if retest_confirmation and volume_confirmed and structure_ok and strong_htf and score >= 0.40:
+    if retest_confirmation and volume_confirmed and structure_ok and strong_htf and multi_bar_confirmed and score >= 0.42:
         return "A", reasons
 
-    if (breakout_confirmation or trendline_confirmation) and structure_ok and score >= 0.34:
+    if (breakout_confirmation or trendline_confirmation) and structure_ok and multi_bar_confirmed and score >= 0.34:
         return "B", reasons
 
-    if (fast_move or acceleration) and score >= 0.30:
+    if (fast_move or acceleration or liquidity_sweep) and score >= 0.30:
         return "C", reasons
 
     return "REJECT", reasons

@@ -14,10 +14,14 @@ def fetch_klines(symbol, interval="15m", limit=200):
     r.raise_for_status()
 
     data = r.json()
+    if not isinstance(data, list):
+        return []
 
     candles = []
 
     for k in data:
+        if not isinstance(k, list) or len(k) < 6:
+            continue
         candles.append({
             "open": float(k[1]),
             "high": float(k[2]),

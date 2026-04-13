@@ -16,6 +16,8 @@ class SmartExitManager:
         self.early_exit_enabled = True
         self.early_exit_check_seconds = 180
         self.early_exit_min_progress = 0.12
+        self.adverse_orderflow_threshold = 0.18
+        self.adverse_oi_bias_threshold = 0.12
 
     def progress_to_take(self, pos, price):
         entry = pos["entry"]
@@ -110,3 +112,20 @@ class SmartExitManager:
 
         progress = self.progress_to_take(pos, price)
         return progress < self.early_exit_min_progress
+
+    def should_exit_on_adverse_flow(self, pos, orderflow_bias=0.0, oi_bias=0.0):
+        if pos.get("external_sync_only"):
+            return False
+
+        if pos["side"] == "BUY":
+            return orderflow_bias <= -self.adverse_orderflow_threshold or oi_bias <= -self.adverse_oi_bias_threshold
+
+        return orderflow_bias >= self.adverse_orderflow_threshold or oi_bias >= self.adverse_oi_bias_threshold
+
+    def should_take_liquidity_target(self, pos, price):
+        target = pos.get("liquidity_target")
+        if target is None:
+            return False
+        if pos["side"] == "BUY":
+            return price >= target
+        return price <= target
