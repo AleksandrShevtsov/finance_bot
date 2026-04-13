@@ -289,6 +289,7 @@ class SmartMomentumPaperBot:
         self.configure_market_feed()
 
         log_cyan("UPDATED SYMBOL LIST:")
+        log_cyan(f"TOTAL SYMBOLS SELECTED - {len(self.symbols)} symbols")
         for s in self.symbols:
             self._empty_position_slot(s)
             print(" -", s)
@@ -726,84 +727,84 @@ class SmartMomentumPaperBot:
         # cooldown после закрытия
         if time.time() < self.cooldown_until.get(symbol, 0):
             return
-            # low price retest filter
-            if LOW_PRICE_REQUIRES_RETEST:
-                if is_low_price_coin(current_price, LOW_PRICE_COIN_THRESHOLD):
-                    if sig.side == "BUY" and retest_confirmation is None:
-                        log_yellow(f"BLOCKED {symbol} | reason=low_price_requires_retest")
-                        return
-            
-            # extension filter
-            blocked_ext = False
-            ext_value = 0.0
-            if EXTENSION_FILTER_ENABLED and sig.side in ("BUY", "SELL"):
-                blocked_ext, ext_value = blocked_by_extension(
-                    candles=candles,
-                    side=sig.side,
-                    lookback=EXTENSION_LOOKBACK,
-                    max_ext_low_pct=MAX_EXTENSION_FROM_LOCAL_LOW_PCT,
-                    max_ext_high_pct=MAX_EXTENSION_FROM_LOCAL_HIGH_PCT,
-                )
-            
-            # anti-fomo filter
-            blocked = False
-            move_pct = 0.0
-            if sig.side in ("BUY", "SELL") and ANTI_FOMO_ENABLED:
-                blocked, move_pct = blocked_by_anti_fomo(
-                    candles=candles,
-                    side=sig.side,
-                    lookback=ANTI_FOMO_LOOKBACK,
-                    max_move_pct=ANTI_FOMO_MAX_MOVE_PCT,
-                )
-            
-            # единая точка BLOCKED-фильтров
-            allowed, reason = apply_block_filters(
-                symbol,
-                sig,
-                structure_ok=structure_ok,
-                volume_confirmed=volume_confirmed,
-                panic_regime=(regime == "high_volatility_panic"),
-                reclaim_needed=(
-                        symbol_profile == "ALT"
-                        and liquidity_sweep is None
-                        and retest_confirmation is None
-                        and sig.signal_class != "A"
-                ),
-                oi_ready=(oi_data is not None),
-                htf_conflict=False,
-                extension_block=blocked_ext,
-                anti_fomo_block=blocked,
+        # low price retest filter
+        if LOW_PRICE_REQUIRES_RETEST:
+            if is_low_price_coin(current_price, LOW_PRICE_COIN_THRESHOLD):
+                if sig.side == "BUY" and retest_confirmation is None:
+                    log_yellow(f"BLOCKED {symbol} | reason=low_price_requires_retest")
+                    return
+        
+        # extension filter
+        blocked_ext = False
+        ext_value = 0.0
+        if EXTENSION_FILTER_ENABLED and sig.side in ("BUY", "SELL"):
+            blocked_ext, ext_value = blocked_by_extension(
+                candles=candles,
+                side=sig.side,
+                lookback=EXTENSION_LOOKBACK,
+                max_ext_low_pct=MAX_EXTENSION_FROM_LOCAL_LOW_PCT,
+                max_ext_high_pct=MAX_EXTENSION_FROM_LOCAL_HIGH_PCT,
             )
+        
+        # anti-fomo filter
+        blocked = False
+        move_pct = 0.0
+        if sig.side in ("BUY", "SELL") and ANTI_FOMO_ENABLED:
+            blocked, move_pct = blocked_by_anti_fomo(
+                candles=candles,
+                side=sig.side,
+                lookback=ANTI_FOMO_LOOKBACK,
+                max_move_pct=ANTI_FOMO_MAX_MOVE_PCT,
+            )
+        
+        # единая точка BLOCKED-фильтров
+        allowed, reason = apply_block_filters(
+            symbol,
+            sig,
+            structure_ok=structure_ok,
+            volume_confirmed=volume_confirmed,
+            panic_regime=(regime == "high_volatility_panic"),
+            reclaim_needed=(
+                    symbol_profile == "ALT"
+                    and liquidity_sweep is None
+                    and retest_confirmation is None
+                    and sig.signal_class != "A"
+            ),
+            oi_ready=(oi_data is not None),
+            htf_conflict=False,
+            extension_block=blocked_ext,
+            anti_fomo_block=blocked,
+        )
+        
+        if not allowed:
+            log_yellow(f"BLOCKED {symbol} | reason={reason}")
+            return
+        
+        # эти проверки оставляем отдельно
+        if breakout_confirmation and not breakout_multi_bar and retest_confirmation is None:
+            log_yellow(f"BLOCKED {symbol} | reason=breakout_not_held")
+            return
+        
+        if trendline_confirmation and not trendline_multi_bar and retest_confirmation is None:
+            log_yellow(f"BLOCKED {symbol} | reason=trendline_not_held")
+            return
+        
+        if is_false_breakout(candles, breakout_confirmation) or is_false_breakout(candles, trendline_confirmation):
+            log_yellow(f"BLOCKED {symbol} | reason=false_breakout")
+            return
+        
+        if sig.side in ("BUY", "SELL"):
+            entry_price = sig.entry_price if sig.entry_price else current_price
             
-            if not allowed:
-                log_yellow(f"BLOCKED {symbol} | reason={reason}")
-                return
-            
-            # эти проверки оставляем отдельно
-            if breakout_confirmation and not breakout_multi_bar and retest_confirmation is None:
-                log_yellow(f"BLOCKED {symbol} | reason=breakout_not_held")
-                return
-            
-            if trendline_confirmation and not trendline_multi_bar and retest_confirmation is None:
-                log_yellow(f"BLOCKED {symbol} | reason=trendline_not_held")
-                return
-            
-            if is_false_breakout(candles, breakout_confirmation) or is_false_breakout(candles, trendline_confirmation):
-                log_yellow(f"BLOCKED {symbol} | reason=false_breakout")
-                return
-            
-            if sig.side in ("BUY", "SELL"):
-                entry_price = sig.entry_price if sig.entry_price else current_price
-                
-                self.open_position(
-                    symbol=symbol,
-                    side=sig.side,
-                    entry_price=entry_price,
-                    score=sig.score,
-                    reason=sig.reason,
-                    candles=candles,
-                    signal_class=sig.signal_class,
-                )
+            self.open_position(
+                symbol=symbol,
+                side=sig.side,
+                entry_price=entry_price,
+                score=sig.score,
+                reason=sig.reason,
+                candles=candles,
+                signal_class=sig.signal_class,
+            )
 
     def heartbeat(self):
         if self.market_feed is not None:

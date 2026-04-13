@@ -13,7 +13,7 @@ class SmartExitManager:
 
         self.profit_be_partial_trigger = 0.30
 
-        self.early_exit_enabled = True
+        self.early_exit_enabled = False
         self.early_exit_check_seconds = 180
         self.early_exit_min_progress = 0.12
         self.adverse_orderflow_threshold = 0.18

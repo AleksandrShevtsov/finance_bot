@@ -1,4 +1,4 @@
-from config import LEVERAGE_MODE, FIXED_LEVERAGE
+from config import LEVERAGE_MODE, FIXED_LEVERAGE, MAX_ALLOWED_LEVERAGE
 from entry_filters import signal_size_multiplier
 from levels import calculate_sl_tp_from_levels
 
@@ -6,13 +6,25 @@ from levels import calculate_sl_tp_from_levels
 class PositionManager:
     def __init__(self, entry_pct=0.03):
         self.entry_pct = entry_pct
-
+    
     def dynamic_leverage(self, score):
-        if score >= 0.8:
-            return 20
-        if score >= 0.6:
-            return 15
-        return 10
+        score = max(0.30, min(score, 1.00))
+        
+        min_score = 0.30
+        max_score = 1.00
+        
+        min_lev = 10
+        max_lev = 50
+        
+        ratio = (score - min_score) / (max_score - min_score)
+        lev = min_lev + ratio * (max_lev - min_lev)
+        
+        lev = int(round(lev))
+        
+        # ограничение максимального плеча
+        lev = min(lev, MAX_ALLOWED_LEVERAGE)
+        
+        return lev
 
     def get_leverage(self, score):
         if LEVERAGE_MODE == "fixed":
@@ -36,8 +48,8 @@ class PositionManager:
                 candles=candles,
                 fallback_sl_pct=sl_pct,
                 fallback_tp_pct=tp_pct,
-                level_buffer_pct=0.002,
-                min_rr=1.5,
+                level_buffer_pct=0.001,
+                min_rr=1.2,
             )
             stop = level_data["stop"]
             take = level_data["take"]

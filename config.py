@@ -67,7 +67,8 @@ MAX_TOTAL_DRAWDOWN_PCT = _get_float("MAX_TOTAL_DRAWDOWN_PCT", 0.0)
 STOP_LOSS_PCT = _get_float("STOP_LOSS_PCT", 0.025)
 TAKE_PROFIT_PCT = _get_float("TAKE_PROFIT_PCT", 0.05)
 
-LEVERAGE_MODE = _get_str("LEVERAGE_MODE", "fixed")
+LEVERAGE_MODE = _get_str("LEVERAGE_MODE", "dinamyc")
+MAX_ALLOWED_LEVERAGE = _get_int("MAX_ALLOWED_LEVERAGE", 50)
 FIXED_LEVERAGE = _get_int("FIXED_LEVERAGE", 20)
 
 BINANCE_WS_BASE = _get_str("BINANCE_WS_BASE", "wss://fstream.binance.com")
