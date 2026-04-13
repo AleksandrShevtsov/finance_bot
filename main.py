@@ -47,6 +47,8 @@ from config import (
     BINANCE_WS_BASE,
     BYBIT_REST_BASE,
     MAX_SILENCE_SECONDS,
+    ALLOW_REJECT_IF_HIGH_RR,
+    HIGH_RR_OVERRIDE_THRESHOLD,
 )
 from utils import log, log_green, log_red, log_yellow, log_cyan
 from exchange_momentum_scanner import ExchangeMomentumScanner
@@ -573,12 +575,14 @@ class SmartMomentumPaperBot:
             self.close_position(symbol, current_price, "adverse_flow_exit")
             return
 
-        if pos["side"] == "BUY" and signal_side == "SELL":
-            self.close_position(symbol, current_price, "reverse_signal")
-            return
-        if pos["side"] == "SELL" and signal_side == "BUY":
-            self.close_position(symbol, current_price, "reverse_signal")
-            return
+        # reverse signal закрывает только слабые сделки
+        if pos.get("signal_class") in {"C", "REJECT"}:
+            if pos["side"] == "BUY" and signal_side == "SELL":
+                self.close_position(symbol, current_price, "reverse_signal")
+                return
+            if pos["side"] == "SELL" and signal_side == "BUY":
+                self.close_position(symbol, current_price, "reverse_signal")
+                return
 
     def print_open_positions(self):
         any_open = False
@@ -606,61 +610,56 @@ class SmartMomentumPaperBot:
         if not any_open:
             log_cyan("OPEN_POS none")
     
+
     def analyze_symbol(self, symbol):
         htf_trend = detect_htf_trend(symbol)
-        
+
         candles = fetch_klines(symbol, "15m", 200)
         if not candles:
             return
-        
+
         current_price = candles[-1]["close"]
-        
+
         structure = detect_market_structure(candles)
         volume_confirmed, last_vol, avg_vol = breakout_volume_confirms(candles)
-        
+
         breakout = detect_range_breakout(candles)
         trendline = detect_trendline_breakout(candles)
-        
+
         breakout_confirmation = breakout
         trendline_confirmation = trendline
-        
+
         retest = None
         if trendline_confirmation:
             retest = detect_retest_after_breakout(candles, trendline_confirmation)
         elif breakout_confirmation:
             retest = detect_retest_after_breakout(candles, breakout_confirmation)
-        
+
         retest_confirmation = retest
-        
+
         fast_move = detect_fast_move(candles)
         acceleration = detect_price_acceleration(candles)
-        
+
         pattern = None
         trades = []
         imbalance = 0.0
         oi_now = None
         oi_prev = None
         oi_data = None
-        
-        # если у тебя есть отдельный OI-модуль — подставь сюда реальные данные
-        # oi_data = ...
-        # oi_now = ...
-        # oi_prev = ...
-        
-        # если у тебя есть detector режима — подставь сюда его
+
         regime = "range_day"
-        
-        # если у тебя есть профиль символа — подставь сюда его
-        # например ALT / MAJOR
-        symbol_profile = "ALT"
-        
-        # если у тебя есть liquidity sweep detector — подставь сюда его
+
+        if symbol in {"BTCUSDT", "ETHUSDT", "SOLUSDT"}:
+            symbol_profile = "CORE"
+        elif current_price < 0.10:
+            symbol_profile = "LOW_CAP"
+        else:
+            symbol_profile = "ALT"
+
         liquidity_sweep = None
-        
-        # если у тебя есть multi-bar подтверждения — подставь реальные
         breakout_multi_bar = False
         trendline_multi_bar = False
-        
+
         sig = build_signal(
             symbol=symbol,
             trades=trades,
@@ -672,29 +671,29 @@ class SmartMomentumPaperBot:
             trendline_confirmation=trendline_confirmation,
             retest_confirmation=retest_confirmation,
         )
-        
-        # fast_move и acceleration только усиливают уже существующий сигнал
+
+        # fast_move/acceleration только усиливают подтвержденный сигнал
         if fast_move and sig.side != "HOLD" and fast_move["direction"] == sig.side:
-            sig.score = max(sig.score, 0.42)
+            sig.score = max(sig.score, 0.40)
             sig.reason = f"{sig.reason}|{fast_move['reason']}"
-        
+
         if acceleration and sig.side != "HOLD" and acceleration["direction"] == sig.side:
-            sig.score = max(sig.score, 0.46)
+            sig.score = max(sig.score, 0.44)
             sig.reason = f"{sig.reason}|{acceleration['reason']}"
-        
+
         sig.side = self.invert_side_if_needed(sig.side)
-        
-        # мягкий HTF penalty вместо жёсткой блокировки
+
+        # мягкий HTF penalty
         if htf_trend == "BULL" and sig.side == "SELL":
             sig.score = max(0.0, sig.score - 0.05)
             sig.reason = f"{sig.reason}|soft_htf_bull_penalty"
-        
+
         if htf_trend == "BEAR" and sig.side == "BUY":
             sig.score = max(0.0, sig.score - 0.05)
             sig.reason = f"{sig.reason}|soft_htf_bear_penalty"
-        
+
         structure_ok = structure_allows_side(structure, sig.side) if sig.side in ("BUY", "SELL") else False
-        
+
         signal_class, quality_reasons = classify_signal_quality(
             side=sig.side,
             score=sig.score,
@@ -707,10 +706,10 @@ class SmartMomentumPaperBot:
             volume_confirmed=volume_confirmed,
             structure_ok=structure_ok,
         )
-        
+
         sig.signal_class = signal_class
         sig.reason = f"{sig.reason}|class={signal_class}|q={','.join(quality_reasons)}"
-        
+
         if self.last_signal.get(symbol) != sig.side:
             log(
                 f"{symbol} signal {self.last_signal.get(symbol, 'NONE')} -> {sig.side} | "
@@ -718,23 +717,21 @@ class SmartMomentumPaperBot:
                 f"score={sig.score:.3f} | reason={sig.reason}"
             )
             self.last_signal[symbol] = sig.side
-        
-        # если позиция уже открыта — только сопровождение
+
         if self.positions.get(symbol) is not None:
             self.manage_position(symbol, current_price, sig.side)
             return
-        
-        # cooldown после закрытия
+
         if time.time() < self.cooldown_until.get(symbol, 0):
             return
-        # low price retest filter
+
+        # дешёвые монеты: нужен хотя бы retest или сильный RR
         if LOW_PRICE_REQUIRES_RETEST:
             if is_low_price_coin(current_price, LOW_PRICE_COIN_THRESHOLD):
                 if sig.side == "BUY" and retest_confirmation is None:
                     log_yellow(f"BLOCKED {symbol} | reason=low_price_requires_retest")
                     return
-        
-        # extension filter
+
         blocked_ext = False
         ext_value = 0.0
         if EXTENSION_FILTER_ENABLED and sig.side in ("BUY", "SELL"):
@@ -745,8 +742,7 @@ class SmartMomentumPaperBot:
                 max_ext_low_pct=MAX_EXTENSION_FROM_LOCAL_LOW_PCT,
                 max_ext_high_pct=MAX_EXTENSION_FROM_LOCAL_HIGH_PCT,
             )
-        
-        # anti-fomo filter
+
         blocked = False
         move_pct = 0.0
         if sig.side in ("BUY", "SELL") and ANTI_FOMO_ENABLED:
@@ -756,8 +752,53 @@ class SmartMomentumPaperBot:
                 lookback=ANTI_FOMO_LOOKBACK,
                 max_move_pct=ANTI_FOMO_MAX_MOVE_PCT,
             )
-        
-        # единая точка BLOCKED-фильтров
+
+        # preview позиции: RR по уровням
+        level_data = None
+        rr_value = 0.0
+
+        try:
+            preview_pos = self.position_manager.build_position(
+                balance=self.balance,
+                side=sig.side,
+                price=(sig.entry_price if sig.entry_price else current_price),
+                sl_pct=STOP_LOSS_PCT,
+                tp_pct=TAKE_PROFIT_PCT,
+                score=sig.score,
+                candles=candles,
+            )
+            level_data = preview_pos.get("level_data")
+            if level_data:
+                rr_value = float(level_data.get("rr", 0.0))
+        except Exception as e:
+            log_yellow(f"RR PREVIEW FAIL {symbol} | error={e}")
+            level_data = None
+            rr_value = 0.0
+
+        # если сигнал формально слабый, но RR высокий — разрешаем
+        if (
+            sig.signal_class == "REJECT"
+            and ALLOW_REJECT_IF_HIGH_RR
+            and rr_value >= HIGH_RR_OVERRIDE_THRESHOLD
+        ):
+            log_yellow(
+                f"REJECT OVERRIDDEN {symbol} | rr={rr_value:.2f} | class=REJECT -> class=B"
+            )
+            sig.signal_class = "B"
+            sig.reason = f"{sig.reason}|reject_overridden_by_rr={rr_value:.2f}"
+
+        # для low-cap не пускаем C/REJECT без retest
+        if symbol_profile == "LOW_CAP" and retest_confirmation is None and sig.signal_class not in {"A", "B"}:
+            log_yellow(f"BLOCKED {symbol} | reason=low_cap_needs_better_context")
+            return
+
+        # breakout без объема разрешаем только если есть retest или RR очень высокий
+        if breakout_confirmation and not volume_confirmed and retest_confirmation is None and rr_value < 2.5:
+            log_yellow(
+                f"BLOCKED {symbol} | reason=breakout_no_volume_low_rr | last_vol={last_vol:.2f} | avg_vol={avg_vol:.2f}"
+            )
+            return
+
         allowed, reason = apply_block_filters(
             symbol,
             sig,
@@ -765,37 +806,42 @@ class SmartMomentumPaperBot:
             volume_confirmed=volume_confirmed,
             panic_regime=(regime == "high_volatility_panic"),
             reclaim_needed=(
-                    symbol_profile == "ALT"
-                    and liquidity_sweep is None
-                    and retest_confirmation is None
-                    and sig.signal_class != "A"
+                symbol_profile in {"ALT", "LOW_CAP"}
+                and liquidity_sweep is None
+                and retest_confirmation is None
+                and sig.signal_class != "A"
             ),
             oi_ready=(oi_data is not None),
             htf_conflict=False,
             extension_block=blocked_ext,
             anti_fomo_block=blocked,
         )
-        
+
         if not allowed:
             log_yellow(f"BLOCKED {symbol} | reason={reason}")
             return
-        
-        # эти проверки оставляем отдельно
-        if breakout_confirmation and not breakout_multi_bar and retest_confirmation is None:
+
+        # отдельные проверки валидности пробоя
+        if breakout_confirmation and not breakout_multi_bar and retest_confirmation is None and rr_value < 2.8:
             log_yellow(f"BLOCKED {symbol} | reason=breakout_not_held")
             return
-        
-        if trendline_confirmation and not trendline_multi_bar and retest_confirmation is None:
+
+        if trendline_confirmation and not trendline_multi_bar and retest_confirmation is None and rr_value < 2.8:
             log_yellow(f"BLOCKED {symbol} | reason=trendline_not_held")
             return
-        
+
         if is_false_breakout(candles, breakout_confirmation) or is_false_breakout(candles, trendline_confirmation):
             log_yellow(f"BLOCKED {symbol} | reason=false_breakout")
             return
-        
+
         if sig.side in ("BUY", "SELL"):
             entry_price = sig.entry_price if sig.entry_price else current_price
-            
+
+            strategy_meta = {
+                "rr_value": rr_value,
+                "symbol_profile": symbol_profile,
+            }
+
             self.open_position(
                 symbol=symbol,
                 side=sig.side,
@@ -804,6 +850,7 @@ class SmartMomentumPaperBot:
                 reason=sig.reason,
                 candles=candles,
                 signal_class=sig.signal_class,
+                strategy_meta=strategy_meta,
             )
 
     def heartbeat(self):
